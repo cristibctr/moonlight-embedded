@@ -26,7 +26,6 @@
 #include "libevdev/libevdev.h"
 #include <Limelight.h>
 
-#include <libudev.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>

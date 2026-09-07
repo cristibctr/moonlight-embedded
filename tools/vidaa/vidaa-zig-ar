@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "${VIDAA_ZIG:-zig}" ar "$@"

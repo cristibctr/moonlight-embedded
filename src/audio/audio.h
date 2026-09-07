@@ -24,6 +24,9 @@
 #ifdef HAVE_ALSA
 extern AUDIO_RENDERER_CALLBACKS audio_callbacks_alsa;
 #endif
+#ifdef HAVE_VIDAA
+extern AUDIO_RENDERER_CALLBACKS audio_callbacks_vidaa;
+#endif
 #ifdef HAVE_SDL
 extern AUDIO_RENDERER_CALLBACKS audio_callbacks_sdl;
 #endif

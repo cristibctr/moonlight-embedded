@@ -9,6 +9,63 @@ include(CheckCSourceCompiles)
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-pointer-sign -Wno-sign-compare -Wno-switch)
 
+option(ENABLE_VIDAA "Compile the VIDAA native hardware decoder" OFF)
+
+if (ENABLE_VIDAA)
+  if (NOT VIDAA_SYSROOT)
+    message(FATAL_ERROR "VIDAA_SYSROOT must point to the copied TV libraries")
+  endif()
+  if (NOT VIDAA_VENDOR_ROOT)
+    message(FATAL_ERROR "VIDAA_VENDOR_ROOT must point to the dependency source directory")
+  endif()
+
+  set(MOONLIGHT_COMMON_INCLUDE_DIR ./third_party/moonlight-common-c/src)
+  set(GAMESTREAM_INCLUDE_DIR ./libgamestream)
+  set(MOONLIGHT_DEFINITIONS HAVE_VIDAA HAVE_EMBEDDED HAVE_ALSA HAVE_EVDEV)
+  set(MOONLIGHT_OPTIONS VIDAA EMBEDDED ALSA EVDEV)
+
+  aux_source_directory(./src SRC_LIST)
+  list(APPEND SRC_LIST
+    ./src/video/vidaa.c
+    ./src/audio/vidaa.c
+    ./src/audio/alsa.c
+    ./src/input/evdev.c
+    ./src/input/mapping.c
+    "${VIDAA_VENDOR_ROOT}/libevdev-1.13.1/libevdev/libevdev.c"
+    "${VIDAA_VENDOR_ROOT}/libevdev-1.13.1/libevdev/libevdev-names.c"
+  )
+
+  include_directories("${PROJECT_BINARY_DIR}")
+  find_package(Threads REQUIRED)
+  add_subdirectory(libgamestream)
+
+  add_executable(moonlight ${SRC_LIST})
+  target_compile_definitions(moonlight PRIVATE ${MOONLIGHT_DEFINITIONS})
+  target_include_directories(moonlight PRIVATE
+    ${GAMESTREAM_INCLUDE_DIR}
+    ${MOONLIGHT_COMMON_INCLUDE_DIR}
+    "${VIDAA_VENDOR_ROOT}/openssl-1.1.1i/include"
+    "${VIDAA_VENDOR_ROOT}/opus-1.3.1/include"
+    "${VIDAA_VENDOR_ROOT}/alsa-include"
+    "${VIDAA_VENDOR_ROOT}/libevdev-1.13.1"
+    "${VIDAA_VENDOR_ROOT}/libevdev-1.13.1/include"
+    "${VIDAA_VENDOR_ROOT}/libevdev-1.13.1/libevdev"
+  )
+  target_link_libraries(moonlight PRIVATE
+    gamestream
+    m
+    Threads::Threads
+    ${CMAKE_DL_LIBS}
+    "${VIDAA_SYSROOT}/usr/local/lib/libhmplayer.so"
+    "${VIDAA_SYSROOT}/vendor/lib/libasound.so.2.0.0"
+    "${VIDAA_OPUS_LIBRARY}"
+  )
+
+  configure_file("./src/configuration.h.in" "${PROJECT_BINARY_DIR}/configuration.h")
+  install(TARGETS moonlight DESTINATION ${CMAKE_INSTALL_BINDIR})
+  return()
+endif()
+
 aux_source_directory(./src SRC_LIST)
 list(APPEND SRC_LIST ./src/input/evdev.c ./src/input/mapping.c ./src/input/udev.c)
 

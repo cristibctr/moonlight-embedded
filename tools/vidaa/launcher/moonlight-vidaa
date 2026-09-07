@@ -1,0 +1,17 @@
+#!/bin/sh
+
+mkdir -p /var/local/moonlight-data/hosts
+cd /var/local/moonlight-data || exit 1
+
+export XDG_CACHE_DIR=/var/local/moonlight-data
+export LD_LIBRARY_PATH=/opt/odin/lib:/opt/libs/std-c++-libs:/opt/libs/nss:/opt/libs:/opt/webengine/lib:/opt/webengine/opera_dir/uva_backends:/opt/webengine/opera_dir/uva_drm_backends:/vendor/lib/utopia/mi_ipc_client:/vendor/lib/utopia:/vendor/lib/appipc:/basic/lib:/vendor/lib:/vendor/lib/WVCENC:/vendor/lib/playready:/opt/mmlib:/mtd_apexe/board/lib:/mtd_apexe/board/lib/dfb:/mtd_apexe/board/lib/atsc:/mtd_apexe/board/lib/nlib:/mtd_apexe/board/lib/libs:/mtd_apexe/board/lib/client:/mtd_apexe/board/com.nvt.nflx/lib:/mtd_apexe/board/com.nvt.ntts/lib:/usr/local/lib:/mslib
+if [ "$MOONLIGHT_VIDAA_MODE" = "direct" ] || [ "$MOONLIGHT_VIDAA_MODE" = "direct-live" ] || [ "$MOONLIGHT_VIDAA_MODE" = "direct-flush" ] || [ "$MOONLIGHT_VIDAA_MODE" = "direct-early" ] || [ "$MOONLIGHT_VIDAA_MODE" = "direct-synthetic" ] || [ "$MOONLIGHT_VIDAA_MODE" = "direct-miracast" ] || [ "$MOONLIGHT_VIDAA_MODE" = "direct-lowlatency" ] || [ "$MOONLIGHT_VIDAA_MODE" = "direct-apstream" ]; then
+  export MOONLIGHT_VIDAA_NOPAUSE=1
+  export LD_PRELOAD=/var/local/libvidaa-clock.nopause.so:/usr/local/lib/libdfb_renderclient.so
+elif [ "$MOONLIGHT_VIDAA_MODE" = "mediasync" ]; then
+  export LD_PRELOAD=/var/local/libvidaa-clock.nopause.so:/usr/local/lib/libdfb_renderclient.so
+else
+  export LD_PRELOAD=/usr/local/lib/libdfb_renderclient.so
+fi
+
+exec /var/local/moonlight "$@"

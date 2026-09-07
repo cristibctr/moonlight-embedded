@@ -27,9 +27,13 @@
 #include "audio/audio.h"
 #include "video/video.h"
 
+#ifdef HAVE_EVDEV
 #include "input/mapping.h"
 #include "input/evdev.h"
+#ifdef HAVE_UDEV
 #include "input/udev.h"
+#endif
+#endif
 #ifdef HAVE_LIBCEC
 #include "input/cec.h"
 #endif
@@ -91,7 +95,9 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
   }
 
   int gamepads = 0;
+  #ifdef HAVE_EVDEV
   gamepads += evdev_gamepads;
+  #endif
   #ifdef HAVE_SDL
   gamepads += sdl_gamepads;
   #endif
@@ -146,11 +152,15 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
   LiStartConnection(&server->serverInfo, &config->stream, &connection_callbacks, platform_get_video(system), platform_get_audio(system, config->audio_device), NULL, drFlags, config->audio_device, 0);
 
   if (IS_EMBEDDED(system)) {
+    #ifdef HAVE_EVDEV
     if (!config->viewonly)
       evdev_start();
+    #endif
     loop_main();
+    #ifdef HAVE_EVDEV
     if (!config->viewonly)
       evdev_stop();
+    #endif
   }
   #ifdef HAVE_SDL
   else if (system == SDL)
@@ -210,7 +220,7 @@ static void help() {
   printf("\t-surround <5.1/7.1>\t\tStream 5.1 or 7.1 surround sound\n");
   printf("\t-keydir <directory>\tLoad encryption keys from directory\n");
   printf("\t-mapping <file>\t\tUse <file> as gamepad mappings configuration file\n");
-  printf("\t-platform <system>\tSpecify system used for audio, video and input: pi/imx/aml/rk/x11/x11_vdpau/sdl/fake (default auto)\n");
+  printf("\t-platform <system>\tSpecify system used for audio, video and input: vidaa/pi/imx/aml/rk/x11/x11_vdpau/sdl/fake (default auto)\n");
   printf("\t-nounsupported\t\tDon't stream if resolution is not officially supported by the server\n");
   printf("\t-quitappafter\t\tSend quit app request to remote after quitting session\n");
   printf("\t-viewonly\t\tDisable all input processing (view-only mode)\n");
@@ -235,7 +245,22 @@ static void pair_check(PSERVER_DATA server) {
   }
 }
 
+#if defined(HAVE_VIDAA) && defined(__arm__)
+#include "vidaa_runtime.h"
+extern unsigned int OPENSSL_armcap_P;
+#endif
+
 int main(int argc, char* argv[]) {
+  #ifdef HAVE_VIDAA
+  // Preserve the last connection step if the retail runtime kills the child.
+  setvbuf(stdout, NULL, _IOLBF, 0);
+  #endif
+  #if defined(HAVE_VIDAA) && defined(__arm__)
+  unsigned int detected_armcap = OPENSSL_armcap_P;
+  OPENSSL_armcap_P = vidaa_openssl_armcap(detected_armcap);
+  if (OPENSSL_armcap_P != detected_armcap)
+    fprintf(stderr, "VIDAA: disabled unsafe ARM cycle-counter read; crypto acceleration retained\n");
+  #endif
   CONFIGURATION config;
   config_parse(argc, argv, &config);
 
@@ -246,6 +271,7 @@ int main(int argc, char* argv[]) {
     printf("Moonlight Embedded %d.%d.%d (%s)\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, COMPILE_OPTIONS);
 
   if (strcmp("map", config.action) == 0) {
+    #ifdef HAVE_EVDEV
     if (config.inputsCount != 1) {
       printf("You need to specify one input device using -input.\n");
       exit(-1);
@@ -254,6 +280,10 @@ int main(int argc, char* argv[]) {
     evdev_create(config.inputs[0], NULL, config.debug_level > 0, config.rotate);
     evdev_map(config.inputs[0]);
     exit(0);
+    #else
+    fprintf(stderr, "Input mapping is not available in this build.\n");
+    exit(-1);
+    #endif
   }
 
   if (config.address == NULL) {
@@ -320,6 +350,12 @@ int main(int argc, char* argv[]) {
     }
 
     config.stream.supportedVideoFormats = VIDEO_FORMAT_H264;
+    if (system == VIDAA && !config.hdr) {
+      /* The shared Moonlight default is SD Rec. 601. Request the HD/UHD SDR
+       * matrix explicitly so Sunshine writes matching HEVC/H.264 metadata. */
+      config.stream.colorSpace = COLORSPACE_REC_709;
+      config.stream.colorRange = COLOR_RANGE_LIMITED;
+    }
     if (config.codec == CODEC_HEVC || (config.codec == CODEC_UNSPECIFIED && platform_prefers_codec(system, CODEC_HEVC))) {
       config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265;
       if (config.hdr)
@@ -346,6 +382,7 @@ int main(int argc, char* argv[]) {
         printf("View-only mode enabled, no input will be sent to the host computer\n");
     } else {
       if (IS_EMBEDDED(system)) {
+        #ifdef HAVE_EVDEV
         char* mapping_env = getenv("SDL_GAMECONTROLLERCONFIG");
         if (config.mapping == NULL && mapping_env == NULL) {
           fprintf(stderr, "Please specify mapping file as default mapping could not be found.\n");
@@ -369,12 +406,23 @@ int main(int argc, char* argv[]) {
           evdev_create(config.inputs[i], mappings, config.debug_level > 0, config.rotate);
         }
 
+        #ifdef HAVE_UDEV
         udev_init(!inputAdded, mappings, config.debug_level > 0, config.rotate);
+        #else
+        if (config.inputsCount == 0) {
+          fprintf(stderr, "Specify at least one -input device for this VIDAA build.\n");
+          exit(-1);
+        }
+        #endif
         evdev_init(config.mouse_emulation);
         rumble_handler = evdev_rumble;
         #ifdef HAVE_LIBCEC
         cec_init();
         #endif /* HAVE_LIBCEC */
+        #else
+        fprintf(stderr, "This VIDAA build currently requires -viewonly.\n");
+        exit(-1);
+        #endif
       }
       #ifdef HAVE_SDL
       else if (system == SDL) {

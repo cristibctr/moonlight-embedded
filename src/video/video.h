@@ -19,6 +19,11 @@
 
 #include <Limelight.h>
 
+#ifdef HAVE_VIDAA
+extern DECODER_RENDERER_CALLBACKS decoder_callbacks_vidaa;
+DECODER_RENDERER_CALLBACKS* vidaa_get_video_callbacks(void);
+#endif
+
 #include <stdbool.h>
 
 #define DISPLAY_FULLSCREEN 1

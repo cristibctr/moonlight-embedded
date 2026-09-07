@@ -35,6 +35,10 @@ typedef bool(*ImxInit)();
 
 enum platform platform_check(char* name) {
   bool std = strcmp(name, "auto") == 0;
+  #ifdef HAVE_VIDAA
+  if (std || strcmp(name, "vidaa") == 0)
+    return VIDAA;
+  #endif
   #ifdef HAVE_IMX
   if (std || strcmp(name, "imx") == 0) {
     void *handle = dlopen("libmoonlight-imx.so", RTLD_NOW | RTLD_GLOBAL);
@@ -140,6 +144,10 @@ void platform_stop(enum platform system) {
 
 DECODER_RENDERER_CALLBACKS* platform_get_video(enum platform system) {
   switch (system) {
+  #ifdef HAVE_VIDAA
+  case VIDAA:
+    return vidaa_get_video_callbacks();
+  #endif
   #ifdef HAVE_X11
   case X11:
     return &decoder_callbacks_x11;
@@ -184,6 +192,10 @@ AUDIO_RENDERER_CALLBACKS* platform_get_audio(enum platform system, char* audio_d
   switch (system) {
   case FAKE:
       return NULL;
+  #ifdef HAVE_VIDAA
+  case VIDAA:
+    return &audio_callbacks_vidaa;
+  #endif
   #ifdef HAVE_SDL
   case SDL:
     return &audio_callbacks_sdl;
@@ -216,6 +228,7 @@ bool platform_prefers_codec(enum platform system, enum codecs codec) {
     return true;
   case CODEC_HEVC:
     switch (system) {
+    case VIDAA:
     case AML:
     case RK:
     case X11_VAAPI:
@@ -241,6 +254,8 @@ char* platform_name(enum platform system) {
     return "AMLogic VPU";
   case RK:
     return "Rockchip VPU";
+  case VIDAA:
+    return "VIDAA HMP hardware decoder";
   case X11:
     return "X Window System (software decoding)";
   case X11_VAAPI:

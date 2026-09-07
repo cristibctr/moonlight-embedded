@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "${VIDAA_ZIG:-zig}" cc -target arm-linux-gnueabi.2.21 -mcpu=cortex_a53 "$@"

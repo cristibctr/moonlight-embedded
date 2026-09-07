@@ -24,6 +24,36 @@
 static h264_stream_t* h264_stream;
 static int initial_width, initial_height;
 
+int gs_sps_add_timing(PLENTRY sps, int fps, uint8_t* out_buf, int capacity) {
+  if (sps == NULL || sps->length < 5 || fps < 1 || fps > 240)
+    return -1;
+  int start_len = sps->data[2] == 0x01 ? 3 : 4;
+  if (capacity < sps->length + 128)
+    return -1;
+  h264_stream_t* stream = h264_new();
+  if (stream == NULL)
+    return -1;
+  int result = read_nal_unit(stream, (uint8_t*)sps->data + start_len, sps->length - start_len);
+  if (result <= 0 || stream->nal->nal_unit_type != NAL_UNIT_TYPE_SPS) {
+    h264_free(stream);
+    return -1;
+  }
+  if (stream->sps->vui.timing_info_present_flag) {
+    memcpy(out_buf, sps->data, sps->length);
+    h264_free(stream);
+    return sps->length;
+  }
+  stream->sps->vui_parameters_present_flag = 1;
+  stream->sps->vui.timing_info_present_flag = 1;
+  stream->sps->vui.num_units_in_tick = 1;
+  stream->sps->vui.time_scale = fps * 2;
+  stream->sps->vui.fixed_frame_rate_flag = 1;
+  memcpy(out_buf, sps->data, start_len);
+  result = write_nal_unit(stream, out_buf + start_len, capacity - start_len);
+  h264_free(stream);
+  return result > 0 ? result + start_len : -1;
+}
+
 void gs_sps_init(int width, int height) {
   h264_stream = h264_new();
   initial_width = width;

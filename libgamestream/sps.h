@@ -25,3 +25,6 @@
 
 void gs_sps_init(int width, int height);
 void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset);
+
+/* Add missing H.264 VUI timing without changing references, level, or color. */
+int gs_sps_add_timing(PLENTRY sps, int fps, uint8_t* out_buf, int capacity);
