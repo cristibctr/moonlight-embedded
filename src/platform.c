@@ -194,6 +194,10 @@ AUDIO_RENDERER_CALLBACKS* platform_get_audio(enum platform system, char* audio_d
       return NULL;
   #ifdef HAVE_VIDAA
   case VIDAA:
+    /* An explicit PCM device selects real Opus playback. Keep the HMP test
+     * clock available when no PCM device is requested. */
+    if (audio_device != NULL && strncmp(audio_device, "hw:", 3) == 0)
+      return &audio_callbacks_alsa;
     return &audio_callbacks_vidaa;
   #endif
   #ifdef HAVE_SDL

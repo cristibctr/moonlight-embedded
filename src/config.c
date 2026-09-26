@@ -123,7 +123,7 @@ char* get_path(char* name, char* extra_data_dirs) {
       return path;
     }
 
-    data_dir = end + 1;
+    data_dir = end != NULL ? end + 1 : NULL;
   } while (end != NULL);
 
   free(data_dirs);

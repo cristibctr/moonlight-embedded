@@ -4,12 +4,17 @@
 #include <assert.h>
 
 int main(void) {
+  assert(strstr(launcher_html, "Press Back to stop") == NULL);
+  assert(strstr(launcher_html, "stream-note") == NULL);
+  assert(strstr(launcher_html, "code===27||code===461||code===8") != NULL);
   char resolution[8];
   int bitrate;
   assert(stream_profile("/start?host=192.168.1.139", resolution, &bitrate));
   assert(strcmp(resolution, "1080p") == 0 && bitrate == 30000);
   assert(stream_profile("/start?resolution=4k&bitrate=80000", resolution, &bitrate));
   assert(strcmp(resolution, "4k") == 0 && bitrate == 80000);
+  assert(stream_profile("/start?resolution=4k&bitrate=120000", resolution, &bitrate));
+  assert(strcmp(resolution, "4k") == 0 && bitrate == 120000);
   assert(!stream_profile("/start?resolution=8k", resolution, &bitrate));
   assert(!stream_profile("/start?bitrate=0", resolution, &bitrate));
   assert(!stream_profile("/start?bitrate=150001", resolution, &bitrate));
