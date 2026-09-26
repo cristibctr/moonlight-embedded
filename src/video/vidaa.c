@@ -79,10 +79,22 @@ typedef struct {
   int h264_timing;
   int hevc_filler;
   int reference_invalidation;
+  /* Drain the display manager queue when its reported delay (ms) reaches
+   * this value. 0 disables. */
+  int dms_drain_ms;
+  int direct_submit;
 } VideoTuning;
 
 static VideoTuning read_video_tuning(void) {
-  VideoTuning tuning = {-1, -1, 0, 0, -1, 0, 0, 1};
+  /* dms_drain_ms defaults to 14: with an empty DMS FIFO the reported delay
+   * stays below ~10 ms; each queued frame adds a frame period. */
+  VideoTuning tuning = {-1, -1, 0, 0, -1, 0, 0, 1, 14, 0};
+  const char* drain_env = getenv("MOONLIGHT_VIDAA_DMS_DRAIN_MS");
+  if (drain_env != NULL)
+    tuning.dms_drain_ms = atoi(drain_env);
+  const char* direct_env = getenv("MOONLIGHT_VIDAA_DIRECT_SUBMIT");
+  if (direct_env != NULL)
+    tuning.direct_submit = atoi(direct_env) != 0;
   FILE* file = fopen("/tmp/moonlight-video-tuning.conf", "r");
   if (file == NULL)
     return tuning;
@@ -112,6 +124,10 @@ static VideoTuning read_video_tuning(void) {
       tuning.hevc_filler = value;
     else if (strcmp(key, "reference_invalidation") == 0 && (value == 0 || value == 1))
       tuning.reference_invalidation = value;
+    else if (strcmp(key, "dms_drain_ms") == 0 && value >= 0 && value <= 200)
+      tuning.dms_drain_ms = value;
+    else if (strcmp(key, "direct_submit") == 0 && (value == 0 || value == 1))
+      tuning.direct_submit = value;
     else
       fprintf(stderr, "VIDAA tuning: ignored unsupported setting %s\n", key);
   }
@@ -357,6 +373,28 @@ static bool injplay_window_checked;
 static uint32_t displaced_display_inputs[16];
 static uint32_t displaced_display_input_count;
 static bool direct_injplay;
+/* Display manager (DMS) queue drain. MI_DISP_GetAttr case 6 word 4 is the
+ * DMS video delay in ms; it grows by one frame period for every frame that
+ * waits in the DMS FIFO. The FIFO never drains by itself at equal in/out
+ * rates, so a startup burst or one late frame adds permanent delay. */
+static int (*mi_disp_get_attr)(uint32_t handle, uint32_t type,
+                               const void* input, void* output);
+static int dms_drain_ms;
+/* 3 (default): drop one displayed frame with a short 2x speed burst.
+ * 0: drop frames until the next IDR (fallback). */
+static int dms_drain_mode;
+/* Mode 3: drop exactly one displayed frame by running the decoder at 2x
+ * (E_MI_VIDEO_FAST_SPEED_2X) until its drop counter advances. Every frame
+ * is still decoded, so references stay intact. */
+static int (*mi_video_set_speed)(uint32_t handle, uint32_t speed);
+static bool speed_drop_active;
+static unsigned int speed_drop_start_frame;
+static uint32_t speed_drop_start_count;
+
+static unsigned int dms_over_count;
+static unsigned int dms_last_drain_frame;
+static unsigned int dms_drains;
+static uint32_t dms_delay_ms;
 static int (*hs_get_state)(int handle, uint32_t* state);
 
 static bool owns_display_input(void) {
@@ -432,6 +470,30 @@ static void restore_game_mode(void) {
     }
     injplay_game_mode_changed = false;
   }
+}
+
+/* The DMS "flip trigger" programs MVOP as soon as a frame is flipped into an
+ * empty display queue, instead of waiting for the next vsync ISR. It is a
+ * global driver debug switch (default off after boot), so enable it only
+ * while streaming. */
+static bool dms_flip_trigger_set;
+
+static bool write_dms_command(const char* command) {
+  FILE* file = fopen("/proc/utopia_mdb/dms", "w");
+  if (file == NULL)
+    return false;
+  bool ok = fputs(command, file) >= 0;
+  ok = fclose(file) == 0 && ok;
+  return ok;
+}
+
+static void set_dms_flip_trigger(bool enable) {
+  if (!enable && !dms_flip_trigger_set)
+    return;
+  bool ok = write_dms_command(enable ? "FlipTrigEvent ON\n" : "FlipTrigEvent OFF\n");
+  dms_flip_trigger_set = enable && ok;
+  fprintf(stderr, "VIDAA DMS flip trigger %s: %s\n", enable ? "on" : "off",
+          ok ? "ok" : "failed");
 }
 
 static void restore_displaced_display_inputs(void) {
@@ -791,6 +853,21 @@ static int create_player_locked(void) {
       fprintf(stderr, "VIDAA tuning: HEVC filler boundary enabled\n");
     fprintf(stderr, "VIDAA tuning: sync_mode=%d min_frame_gap=%d decode_order=%d\n",
             tuning.sync_mode, tuning.min_frame_gap, tuning.decode_order);
+    dms_drain_ms = tuning.dms_drain_ms;
+    const char* drain_mode_env = getenv("MOONLIGHT_VIDAA_DMS_DRAIN_MODE");
+    dms_drain_mode = drain_mode_env != NULL ? atoi(drain_mode_env) : 3;
+    mi_video_set_speed = (int (*)(uint32_t, uint32_t))dlsym(
+        RTLD_DEFAULT, "MI_VIDEO_SetSpeed");
+    speed_drop_active = false;
+
+    dms_over_count = 0;
+    dms_last_drain_frame = 0;
+    dms_drains = 0;
+    dms_delay_ms = 0;
+    mi_disp_get_attr = (int (*)(uint32_t, uint32_t, const void*, void*))dlsym(
+        RTLD_DEFAULT, "MI_DISP_GetAttr");
+    fprintf(stderr, "VIDAA tuning: dms_drain_ms=%d direct_submit=%d\n",
+            dms_drain_ms, tuning.direct_submit);
     if (tuning.sync_mode >= 0) {
       MIInjplaySyncMode sync = {.mode = (uint32_t)tuning.sync_mode,
                                .pcr_pid = 0x1fff};
@@ -920,6 +997,9 @@ static int create_player_locked(void) {
     }
 
     direct_injplay = true;
+    if (getenv("MOONLIGHT_VIDAA_FLIP_TRIGGER") == NULL ||
+        strcmp(getenv("MOONLIGHT_VIDAA_FLIP_TRIGGER"), "0") != 0)
+      set_dms_flip_trigger(true);
     mi_disp_get_picture_param =
         (int (*)(uint32_t, uint32_t, const void*, void*))dlsym(
             RTLD_DEFAULT, "MI_DISP_GetPictureParam");
@@ -1343,6 +1423,10 @@ static void vidaa_cleanup(void) {
    * injector allocated until the TV reboots. */
   if (player != NULL) {
     if (direct_injplay) {
+      set_dms_flip_trigger(false);
+      if (speed_drop_active && mi_video_set_speed != NULL)
+        mi_video_set_speed(injplay_decoder_handle, 0);
+      speed_drop_active = false;
       restore_game_mode();
       restore_window_mute();
       int stop_result =
@@ -1478,10 +1562,84 @@ void vidaa_hmp_audio_submit(const char* data, int length) {
   pthread_mutex_unlock(&player_mutex);
 }
 
+/* Watches the DMS delay and drains its FIFO when a backlog forms. Returns -1
+ * when the caller must drop frames until the next IDR (mode 0), else 0. */
+static int vidaa_dms_check(unsigned int frame) {
+  if (dms_drain_mode == 3) {
+    if (mi_disp_get_attr == NULL || mi_video_set_speed == NULL)
+      return 0;
+    if (speed_drop_active) {
+      uint32_t counts[5] = {0};
+      bool dropped = mi_video_get_attr(injplay_decoder_handle, 0x101, NULL, counts) == 0 &&
+                     counts[3] != speed_drop_start_count;
+      if (dropped || frame - speed_drop_start_frame >= 4) {
+        int result = mi_video_set_speed(injplay_decoder_handle, 0);
+        speed_drop_active = false;
+        if (debug_events || dms_drains <= 20)
+          fprintf(stderr, "VIDAA DMS drain %u done: frames=%u dropped=%u speed1x=%d\n",
+                  dms_drains, frame - speed_drop_start_frame,
+                  counts[3] - speed_drop_start_count, result);
+      }
+      return 0;
+    }
+    if (frame % 2 != 0)
+      return 0;
+    uint32_t delay_info[32];
+    memset(delay_info, 0, sizeof(delay_info));
+    if (mi_disp_get_attr(injplay_display_handle, 6, NULL, delay_info) == 0)
+      dms_delay_ms = delay_info[4];
+    if (dms_drain_ms <= 0 || frame <= 60)
+      return 0;
+    dms_over_count = dms_delay_ms >= (uint32_t)dms_drain_ms ? dms_over_count + 1 : 0;
+    if (dms_over_count < 2 || frame - dms_last_drain_frame < 6)
+      return 0;
+    uint32_t counts[5] = {0};
+    if (mi_video_get_attr(injplay_decoder_handle, 0x101, NULL, counts) != 0)
+      return 0;
+    int result = mi_video_set_speed(injplay_decoder_handle, 256);
+    if (result != 0) {
+      fprintf(stderr, "VIDAA DMS drain: 2x speed failed=%d; disabling\n", result);
+      dms_drain_ms = 0;
+      return 0;
+    }
+    dms_over_count = 0;
+    dms_last_drain_frame = frame;
+    dms_drains++;
+    speed_drop_active = true;
+    speed_drop_start_frame = frame;
+    speed_drop_start_count = counts[3];
+    if (debug_events || dms_drains <= 20)
+      fprintf(stderr, "VIDAA DMS drain %u: frame=%u delay_ms=%u speed2x\n", dms_drains,
+              frame, dms_delay_ms);
+    return 0;
+  }
+  if (mi_disp_get_attr == NULL || frame % 15 != 0)
+    return 0;
+  uint32_t delay_info[32];
+  memset(delay_info, 0, sizeof(delay_info));
+  if (mi_disp_get_attr(injplay_display_handle, 6, NULL, delay_info) == 0)
+    dms_delay_ms = delay_info[4];
+  if (dms_drain_ms <= 0 || frame <= 120)
+    return 0;
+  dms_over_count = dms_delay_ms >= (uint32_t)dms_drain_ms ? dms_over_count + 1 : 0;
+  if (dms_over_count < 2 || frame - dms_last_drain_frame < 120u)
+    return 0;
+  dms_over_count = 0;
+  dms_last_drain_frame = frame;
+  dms_drains++;
+  if (debug_events || dms_drains <= 20)
+    fprintf(stderr, "VIDAA DMS drain %u: frame=%u delay_ms=%u idr\n", dms_drains,
+            frame, dms_delay_ms);
+  return dms_drain_mode == 0 ? -1 : 0;
+}
+
 static int vidaa_submit_decode_unit(PDECODE_UNIT decode_unit) {
   uint64_t submit_start_us = LiGetMicroseconds();
   uint64_t submit_absolute_us = trace_video != NULL ? monotonic_us() : 0;
   if (player == NULL || reserve_packet((size_t)decode_unit->fullLength + 256) != 0)
+    return DR_NEED_IDR;
+
+  if (direct_injplay && vidaa_dms_check(submitted_frames + 1) < 0)
     return DR_NEED_IDR;
 
   size_t offset = 0;
@@ -1601,7 +1759,8 @@ static int vidaa_submit_decode_unit(PDECODE_UNIT decode_unit) {
           "host_ms=%.1f receive_ms=%.1f client_queue_ms=%.1f write_ms=%.1f "
           "count_result=%d decoded=%u errors=%u skipped=%u dropped=%u "
           "displayed=%u buffer_result=%d es_bytes=%u es_capacity=%u "
-          "rtt_valid=%u rtt_ms=%u rtt_variance_ms=%u pending_frames=%d\n",
+          "rtt_valid=%u rtt_ms=%u rtt_variance_ms=%u pending_frames=%d "
+          "dms_delay_ms=%u dms_drains=%u\n",
           submitted_frames, (source_pts - first_source_pts) * 1000.0,
           buffer.pts / 90.0, display_pts / 90.0,
           pts_result, parser_pts / 90.0, parser_result,
@@ -1611,7 +1770,8 @@ static int vidaa_submit_decode_unit(PDECODE_UNIT decode_unit) {
           (double)(submit_end_us - submit_start_us) / 1000.0,
           count_result, counts[0], counts[1], counts[2], counts[3], counts[4],
           buffer_result, buffers[1], buffers[0], network_rtt_valid ? 1u : 0u,
-          network_rtt_ms, network_variance_ms, LiGetPendingVideoFrames());
+          network_rtt_ms, network_variance_ms, LiGetPendingVideoFrames(),
+          dms_delay_ms, dms_drains);
     }
 
     return DR_OK;
@@ -1907,6 +2067,12 @@ DECODER_RENDERER_CALLBACKS* vidaa_get_video_callbacks(void) {
   decoder_callbacks_vidaa.capabilities &= ~CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
   if (tuning.reference_invalidation)
     decoder_callbacks_vidaa.capabilities |= CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
-  fprintf(stderr, "VIDAA: HEVC reference invalidation=%d\n", tuning.reference_invalidation);
+  /* Direct submit decodes on the receive thread and skips the decode-unit
+   * queue handoff. */
+  decoder_callbacks_vidaa.capabilities &= ~CAPABILITY_DIRECT_SUBMIT;
+  if (tuning.direct_submit)
+    decoder_callbacks_vidaa.capabilities |= CAPABILITY_DIRECT_SUBMIT;
+  fprintf(stderr, "VIDAA: HEVC reference invalidation=%d direct submit=%d\n",
+          tuning.reference_invalidation, tuning.direct_submit);
   return &decoder_callbacks_vidaa;
 }
